@@ -167,28 +167,49 @@ std::string toJson(const ImageData& img) {
 int main() {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
+    int port = 8787;
+    char* envPort = getenv("PORT");
+    if (envPort) {
+        port = std::stoi(envPort);
+    }
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(8787);
+    addr.sin_port = htons(port);
 
     bind(sockfd, (sockaddr*)&addr, sizeof(addr));
     listen(sockfd, 16);
+
+    std::cout << "Server running on port: " << port << std::endl;
 
     while (true) {
         int client = accept(sockfd, nullptr, nullptr);
 
         char buf[8192];
         int n = read(client, buf, sizeof(buf)-1);
-        buf[n] = '\0';
+        if (n <= 0) {
+            close(client);
+            continue;
+        }
 
+        buf[n] = '\0';
         std::string req(buf);
 
         try {
             size_t pos = req.find("url=");
             if (pos == std::string::npos) throw std::runtime_error("no url");
 
-            std::string url = req.substr(pos + 4);
+            // 🔥 FIX parse URL
+            size_t end = req.find("&", pos);
+            if (end == std::string::npos) {
+                end = req.find(" ", pos);
+            }
+
+            std::string url = req.substr(pos + 4, end - (pos + 4));
+
+            std::cout << "URL: " << url << std::endl;
+
             int resize = 64;
 
             std::string key = url + "_" + std::to_string(resize);
@@ -208,14 +229,28 @@ int main() {
             res << "HTTP/1.1 200 OK\r\n"
                 << "Content-Type: application/json\r\n"
                 << "Access-Control-Allow-Origin: *\r\n"
+                << "Connection: close\r\n"
                 << "Content-Length: " << body.size() << "\r\n\r\n"
                 << body;
 
             write(client, res.str().c_str(), res.str().size());
 
-        } catch (...) {
-            std::string err = "{\"error\":\"blocked\"}";
-            write(client, err.c_str(), err.size());
+        } catch (const std::exception& e) {
+
+            std::cout << "ERROR: " << e.what() << std::endl;
+
+            // 🔥 FIX HTTP ERROR RESPONSE
+            std::string body = "{\"error\":\"blocked\"}";
+
+            std::ostringstream res;
+            res << "HTTP/1.1 500 Internal Server Error\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Access-Control-Allow-Origin: *\r\n"
+                << "Connection: close\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+
+            write(client, res.str().c_str(), res.str().size());
         }
 
         close(client);
