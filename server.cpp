@@ -1,7 +1,6 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <fstream>
 #include <sstream>
 #include <cstring>
 #include <cstdlib>
@@ -14,8 +13,6 @@
 #include <ctime>
 
 #define STB_IMAGE_IMPLEMENTATION
-#define STBI_ONLY_JPEG
-#define STBI_ONLY_PNG
 #include "third_party/stb/stb_image.h"
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -27,11 +24,11 @@ struct ImageData {
     std::vector<std::vector<std::vector<uint8_t>>> pixels;
 };
 
-std::unordered_map<std::string, ImageData> CACHE;
-
 struct MemoryBuffer {
     std::vector<unsigned char> data;
 };
+
+std::unordered_map<std::string, ImageData> CACHE;
 
 static size_t CurlWriteMemory(
     void* contents,
@@ -183,12 +180,6 @@ static std::string sanitizeDiscordUrl(
         );
     }
 
-    size_t q = url.find('?');
-
-    if (q != std::string::npos) {
-        url = url.substr(0, q);
-    }
-
     return url;
 }
 
@@ -254,7 +245,7 @@ MemoryBuffer downloadImage(
     if (res != CURLE_OK) {
 
         throw std::runtime_error(
-            "download failed"
+            curl_easy_strerror(res)
         );
     }
 
@@ -264,6 +255,11 @@ MemoryBuffer downloadImage(
             "empty image"
         );
     }
+
+    std::cout
+        << "Downloaded bytes: "
+        << mem.data.size()
+        << std::endl;
 
     return mem;
 }
@@ -294,7 +290,7 @@ ImageData loadImageToMatrix(
     unsigned char* src =
         stbi_load_from_memory(
             mem.data.data(),
-            mem.data.size(),
+            (int)mem.data.size(),
             &w,
             &h,
             &c,
@@ -309,7 +305,7 @@ ImageData loadImageToMatrix(
             << std::endl;
 
         throw std::runtime_error(
-            "stbi_load failed"
+            stbi_failure_reason()
         );
     }
 
@@ -533,6 +529,11 @@ int main() {
         } catch (
             const std::exception& e
         ) {
+
+            std::cerr
+                << "ERROR: "
+                << e.what()
+                << std::endl;
 
             std::string body =
                 std::string("{\"error\":\"")
