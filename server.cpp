@@ -14,6 +14,8 @@
 #include <ctime>
 
 #define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
 #include "third_party/stb/stb_image.h"
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -27,10 +29,34 @@ struct ImageData {
 
 std::unordered_map<std::string, ImageData> CACHE;
 
+struct MemoryBuffer {
+    std::vector<unsigned char> data;
+};
+
+static size_t CurlWriteMemory(
+    void* contents,
+    size_t size,
+    size_t nmemb,
+    void* userp
+) {
+    size_t total = size * nmemb;
+
+    MemoryBuffer* mem = (MemoryBuffer*)userp;
+
+    unsigned char* ptr = (unsigned char*)contents;
+
+    mem->data.insert(
+        mem->data.end(),
+        ptr,
+        ptr + total
+    );
+
+    return total;
+}
+
 static std::string urlDecode(const std::string& s) {
 
     std::string out;
-    out.reserve(s.size());
 
     for (size_t i = 0; i < s.size(); ++i) {
 
@@ -38,11 +64,19 @@ static std::string urlDecode(const std::string& s) {
 
             int v = 0;
 
-            std::istringstream iss(s.substr(i + 1, 2));
+            std::istringstream iss(
+                s.substr(i + 1, 2)
+            );
 
             if (iss >> std::hex >> v) {
-                out.push_back(static_cast<char>(v));
+
+                out.push_back((char)v);
+
                 i += 2;
+
+            } else {
+
+                out.push_back(s[i]);
             }
 
         } else if (s[i] == '+') {
@@ -58,111 +92,6 @@ static std::string urlDecode(const std::string& s) {
     return out;
 }
 
-static size_t CurlWriteToFile(
-    void* contents,
-    size_t size,
-    size_t nmemb,
-    void* userp
-) {
-    std::ofstream* ofs = static_cast<std::ofstream*>(userp);
-
-    ofs->write(
-        static_cast<char*>(contents),
-        size * nmemb
-    );
-
-    return size * nmemb;
-}
-
-bool downloadImage(
-    const std::string& url,
-    const std::string& path
-) {
-
-    CURL* curl = curl_easy_init();
-
-    if (!curl) {
-        return false;
-    }
-
-    std::ofstream ofs(path, std::ios::binary);
-
-    if (!ofs.is_open()) {
-        curl_easy_cleanup(curl);
-        return false;
-    }
-
-    struct curl_slist* headers = nullptr;
-
-    headers = curl_slist_append(
-        headers,
-        "Accept: image/png,image/jpeg,image/webp,*/*"
-    );
-
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
-
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteToFile);
-
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ofs);
-
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_USERAGENT,
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0 Safari/537.36"
-    );
-
-    curl_easy_setopt(curl, CURLOPT_REFERER, "https://discord.com/");
-
-    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
-
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-
-    CURLcode res = curl_easy_perform(curl);
-
-    curl_slist_free_all(headers);
-
-    curl_easy_cleanup(curl);
-
-    ofs.close();
-
-    if (res != CURLE_OK) {
-
-        std::cerr
-            << "curl failed: "
-            << curl_easy_strerror(res)
-            << std::endl;
-
-        return false;
-    }
-
-    std::ifstream check(path, std::ios::binary | std::ios::ate);
-
-    if (!check.is_open() || check.tellg() <= 0) {
-
-        std::cerr << "empty image" << std::endl;
-
-        return false;
-    }
-
-    return true;
-}
-
 struct Query {
     std::string imageUrl;
     int resize = 64;
@@ -172,98 +101,171 @@ static Query parseQuery(const std::string& req) {
 
     Query q;
 
-    size_t firstLineEnd = req.find("\r\n");
+    size_t pos = req.find("url=");
 
-    std::string firstLine =
-        req.substr(0, firstLineEnd);
-
-    size_t qPos = firstLine.find('?');
-
-    if (qPos == std::string::npos) {
+    if (pos == std::string::npos) {
         return q;
     }
 
-    std::string query =
-        firstLine.substr(qPos + 1);
+    size_t end = req.find(" ", pos);
 
-    size_t spacePos = query.find(' ');
+    std::string encoded =
+        req.substr(pos + 4, end - (pos + 4));
 
-    if (spacePos != std::string::npos) {
-        query = query.substr(0, spacePos);
-    }
+    q.imageUrl = urlDecode(encoded);
 
-    std::stringstream ss(query);
+    size_t resizePos = req.find("resize=");
 
-    std::string pair;
+    if (resizePos != std::string::npos) {
 
-    while (std::getline(ss, pair, '&')) {
+        try {
 
-        size_t eq = pair.find('=');
+            size_t resizeEnd =
+                req.find(" ", resizePos);
 
-        if (eq == std::string::npos) {
-            continue;
-        }
+            std::string val =
+                req.substr(
+                    resizePos + 7,
+                    resizeEnd - (resizePos + 7)
+                );
 
-        std::string key =
-            pair.substr(0, eq);
+            q.resize =
+                std::max(
+                    8,
+                    std::min(256, std::stoi(val))
+                );
 
-        std::string value =
-            pair.substr(eq + 1);
-
-        value = urlDecode(value);
-
-        if (key == "url") {
-
-            q.imageUrl = value;
-
-        } else if (key == "resize") {
-
-            try {
-
-                q.resize =
-                    std::max(
-                        8,
-                        std::min(
-                            256,
-                            std::stoi(value)
-                        )
-                    );
-
-            } catch (...) {}
-        }
+        } catch (...) {}
     }
 
     return q;
+}
+
+static std::string httpJson(
+    int code,
+    const std::string& body
+) {
+    std::ostringstream oss;
+
+    oss
+        << "HTTP/1.1 "
+        << code
+        << " OK\r\n"
+
+        << "Content-Type: application/json\r\n"
+
+        << "Access-Control-Allow-Origin: *\r\n"
+
+        << "Connection: close\r\n"
+
+        << "Content-Length: "
+        << body.size()
+        << "\r\n\r\n"
+
+        << body;
+
+    return oss.str();
 }
 
 static std::string sanitizeDiscordUrl(
     std::string url
 ) {
 
-    size_t pos =
+    size_t media =
         url.find("media.discordapp.net");
 
-    if (pos != std::string::npos) {
+    if (media != std::string::npos) {
 
         url.replace(
-            pos,
+            media,
             strlen("media.discordapp.net"),
             "cdn.discordapp.com"
         );
     }
 
-    pos = url.find("format=webp");
+    size_t q = url.find('?');
 
-    if (pos != std::string::npos) {
-
-        url.replace(
-            pos,
-            strlen("format=webp"),
-            "format=png"
-        );
+    if (q != std::string::npos) {
+        url = url.substr(0, q);
     }
 
     return url;
+}
+
+MemoryBuffer downloadImage(
+    const std::string& url
+) {
+
+    CURL* curl = curl_easy_init();
+
+    if (!curl) {
+        throw std::runtime_error("curl init failed");
+    }
+
+    MemoryBuffer mem;
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_URL,
+        url.c_str()
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_FOLLOWLOCATION,
+        1L
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_USERAGENT,
+        "Mozilla/5.0"
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_WRITEFUNCTION,
+        CurlWriteMemory
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_WRITEDATA,
+        &mem
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_SSL_VERIFYPEER,
+        0L
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_SSL_VERIFYHOST,
+        0L
+    );
+
+    CURLcode res =
+        curl_easy_perform(curl);
+
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+
+        throw std::runtime_error(
+            "download failed"
+        );
+    }
+
+    if (mem.data.empty()) {
+
+        throw std::runtime_error(
+            "empty image"
+        );
+    }
+
+    return mem;
 }
 
 ImageData loadImageToMatrix(
@@ -277,37 +279,22 @@ ImageData loadImageToMatrix(
     if (!(url.rfind(
             "https://cdn.discordapp.com/",
             0
-        ) == 0 ||
-
-          url.rfind(
-            "https://media.discordapp.net/",
-            0
-          ) == 0)) {
+        ) == 0)) {
 
         throw std::runtime_error(
-            "Only Discord image links allowed"
+            "Only Discord links allowed"
         );
     }
 
-    std::string tmp =
-        "/tmp/img_" +
-        std::to_string(std::time(nullptr)) +
-        "_" +
-        std::to_string(rand()) +
-        ".png";
-
-    if (!downloadImage(url, tmp)) {
-
-        throw std::runtime_error(
-            "download failed"
-        );
-    }
+    MemoryBuffer mem =
+        downloadImage(url);
 
     int w, h, c;
 
     unsigned char* src =
-        stbi_load(
-            tmp.c_str(),
+        stbi_load_from_memory(
+            mem.data.data(),
+            mem.data.size(),
             &w,
             &h,
             &c,
@@ -317,10 +304,9 @@ ImageData loadImageToMatrix(
     if (!src) {
 
         std::cerr
+            << "stbi failed: "
             << stbi_failure_reason()
             << std::endl;
-
-        remove(tmp.c_str());
 
         throw std::runtime_error(
             "stbi_load failed"
@@ -351,8 +337,6 @@ ImageData loadImageToMatrix(
         );
 
     stbi_image_free(src);
-
-    remove(tmp.c_str());
 
     if (!ok) {
 
@@ -392,7 +376,9 @@ ImageData loadImageToMatrix(
     return out;
 }
 
-std::string toJson(const ImageData& img) {
+std::string toJson(
+    const ImageData& img
+) {
 
     std::ostringstream s;
 
@@ -408,8 +394,7 @@ std::string toJson(const ImageData& img) {
 
         for (int x = 0; x < img.width; ++x) {
 
-            const auto& p =
-                img.pixels[y][x];
+            auto& p = img.pixels[y][x];
 
             s << "["
               << (int)p[0]
@@ -436,33 +421,6 @@ std::string toJson(const ImageData& img) {
     return s.str();
 }
 
-static std::string makeResponse(
-    int code,
-    const std::string& body
-) {
-
-    std::ostringstream oss;
-
-    oss << "HTTP/1.1 "
-        << code;
-
-    if (code == 200) {
-        oss << " OK\r\n";
-    } else {
-        oss << " ERROR\r\n";
-    }
-
-    oss << "Content-Type: application/json\r\n"
-        << "Access-Control-Allow-Origin: *\r\n"
-        << "Connection: close\r\n"
-        << "Content-Length: "
-        << body.size()
-        << "\r\n\r\n"
-        << body;
-
-    return oss.str();
-}
-
 int main() {
 
     int port = 8787;
@@ -475,10 +433,6 @@ int main() {
 
     int sockfd =
         socket(AF_INET, SOCK_STREAM, 0);
-
-    if (sockfd < 0) {
-        return 1;
-    }
 
     int opt = 1;
 
@@ -493,23 +447,16 @@ int main() {
     sockaddr_in addr{};
 
     addr.sin_family = AF_INET;
-
     addr.sin_addr.s_addr = INADDR_ANY;
-
     addr.sin_port = htons(port);
 
-    if (bind(
-            sockfd,
-            (sockaddr*)&addr,
-            sizeof(addr)
-        ) < 0) {
+    bind(
+        sockfd,
+        (sockaddr*)&addr,
+        sizeof(addr)
+    );
 
-        return 1;
-    }
-
-    if (listen(sockfd, 16) < 0) {
-        return 1;
-    }
+    listen(sockfd, 16);
 
     std::cout
         << "Server running on port: "
@@ -521,17 +468,13 @@ int main() {
         int client =
             accept(sockfd, nullptr, nullptr);
 
-        if (client < 0) {
-            continue;
-        }
-
         char buf[8192];
 
         int n =
             read(
                 client,
                 buf,
-                sizeof(buf) - 1
+                sizeof(buf)-1
             );
 
         if (n <= 0) {
@@ -552,11 +495,11 @@ int main() {
 
             if (q.imageUrl.empty()) {
 
-                std::string body =
-                    "{\"message\":\"use ?url=<url>&resize=64\"}";
-
                 std::string res =
-                    makeResponse(200, body);
+                    httpJson(
+                        200,
+                        "{\"message\":\"OK\"}"
+                    );
 
                 write(
                     client,
@@ -569,33 +512,17 @@ int main() {
                 continue;
             }
 
-            std::string key =
-                q.imageUrl +
-                "_" +
-                std::to_string(q.resize);
-
-            ImageData img;
-
-            if (CACHE.find(key) != CACHE.end()) {
-
-                img = CACHE[key];
-
-            } else {
-
-                img =
-                    loadImageToMatrix(
-                        q.imageUrl,
-                        q.resize
-                    );
-
-                CACHE[key] = img;
-            }
+            auto img =
+                loadImageToMatrix(
+                    q.imageUrl,
+                    q.resize
+                );
 
             std::string body =
                 toJson(img);
 
             std::string res =
-                makeResponse(200, body);
+                httpJson(200, body);
 
             write(
                 client,
@@ -603,12 +530,9 @@ int main() {
                 res.size()
             );
 
-        } catch (const std::exception& e) {
-
-            std::cerr
-                << "ERROR: "
-                << e.what()
-                << std::endl;
+        } catch (
+            const std::exception& e
+        ) {
 
             std::string body =
                 std::string("{\"error\":\"")
@@ -616,7 +540,7 @@ int main() {
                 + "\"}";
 
             std::string res =
-                makeResponse(500, body);
+                httpJson(500, body);
 
             write(
                 client,
@@ -627,6 +551,4 @@ int main() {
 
         close(client);
     }
-
-    return 0;
 }
