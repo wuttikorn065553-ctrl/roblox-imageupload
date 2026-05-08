@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <curl/curl.h>
 #include <ctime>
+#include <webp/decode.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "third_party/stb/stb_image.h"
@@ -30,17 +31,34 @@ struct MemoryBuffer {
 
 std::unordered_map<std::string, ImageData> CACHE;
 
+bool isWebP(
+    const unsigned char* data,
+    size_t size
+) {
+
+    if (size < 12) {
+        return false;
+    }
+
+    return
+        memcmp(data, "RIFF", 4) == 0 &&
+        memcmp(data + 8, "WEBP", 4) == 0;
+}
+
 static size_t CurlWriteMemory(
     void* contents,
     size_t size,
     size_t nmemb,
     void* userp
 ) {
+
     size_t total = size * nmemb;
 
-    MemoryBuffer* mem = (MemoryBuffer*)userp;
+    MemoryBuffer* mem =
+        (MemoryBuffer*)userp;
 
-    unsigned char* ptr = (unsigned char*)contents;
+    unsigned char* ptr =
+        (unsigned char*)contents;
 
     mem->data.insert(
         mem->data.end(),
@@ -51,13 +69,18 @@ static size_t CurlWriteMemory(
     return total;
 }
 
-static std::string urlDecode(const std::string& s) {
+static std::string urlDecode(
+    const std::string& s
+) {
 
     std::string out;
 
     for (size_t i = 0; i < s.size(); ++i) {
 
-        if (s[i] == '%' && i + 2 < s.size()) {
+        if (
+            s[i] == '%' &&
+            i + 2 < s.size()
+        ) {
 
             int v = 0;
 
@@ -90,35 +113,48 @@ static std::string urlDecode(const std::string& s) {
 }
 
 struct Query {
+
     std::string imageUrl;
     int resize = 64;
 };
 
-static Query parseQuery(const std::string& req) {
+static Query parseQuery(
+    const std::string& req
+) {
 
     Query q;
 
-    size_t pos = req.find("url=");
+    size_t pos =
+        req.find("url=");
 
     if (pos == std::string::npos) {
         return q;
     }
 
-    size_t end = req.find(" ", pos);
+    size_t end =
+        req.find(" ", pos);
 
     std::string encoded =
-        req.substr(pos + 4, end - (pos + 4));
+        req.substr(
+            pos + 4,
+            end - (pos + 4)
+        );
 
-    q.imageUrl = urlDecode(encoded);
+    q.imageUrl =
+        urlDecode(encoded);
 
-    size_t resizePos = req.find("resize=");
+    size_t resizePos =
+        req.find("resize=");
 
     if (resizePos != std::string::npos) {
 
         try {
 
             size_t resizeEnd =
-                req.find(" ", resizePos);
+                req.find(
+                    " ",
+                    resizePos
+                );
 
             std::string val =
                 req.substr(
@@ -129,7 +165,10 @@ static Query parseQuery(const std::string& req) {
             q.resize =
                 std::max(
                     8,
-                    std::min(256, std::stoi(val))
+                    std::min(
+                        256,
+                        std::stoi(val)
+                    )
                 );
 
         } catch (...) {}
@@ -142,6 +181,7 @@ static std::string httpJson(
     int code,
     const std::string& body
 ) {
+
     std::ostringstream oss;
 
     oss
@@ -169,13 +209,17 @@ static std::string sanitizeDiscordUrl(
 ) {
 
     size_t media =
-        url.find("media.discordapp.net");
+        url.find(
+            "media.discordapp.net"
+        );
 
     if (media != std::string::npos) {
 
         url.replace(
             media,
-            strlen("media.discordapp.net"),
+            strlen(
+                "media.discordapp.net"
+            ),
             "cdn.discordapp.com"
         );
     }
@@ -187,10 +231,14 @@ MemoryBuffer downloadImage(
     const std::string& url
 ) {
 
-    CURL* curl = curl_easy_init();
+    CURL* curl =
+        curl_easy_init();
 
     if (!curl) {
-        throw std::runtime_error("curl init failed");
+
+        throw std::runtime_error(
+            "curl init failed"
+        );
     }
 
     MemoryBuffer mem;
@@ -205,6 +253,12 @@ MemoryBuffer downloadImage(
         curl,
         CURLOPT_FOLLOWLOCATION,
         1L
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_ACCEPT_ENCODING,
+        ""
     );
 
     curl_easy_setopt(
@@ -270,12 +324,18 @@ ImageData loadImageToMatrix(
 ) {
 
     std::string url =
-        sanitizeDiscordUrl(originalUrl);
+        sanitizeDiscordUrl(
+            originalUrl
+        );
 
-    if (!(url.rfind(
-            "https://cdn.discordapp.com/",
-            0
-        ) == 0)) {
+    if (
+        !(
+            url.rfind(
+                "https://cdn.discordapp.com/",
+                0
+            ) == 0
+        )
+    ) {
 
         throw std::runtime_error(
             "Only Discord links allowed"
@@ -287,32 +347,67 @@ ImageData loadImageToMatrix(
 
     int w, h, c;
 
-    unsigned char* src =
-        stbi_load_from_memory(
+    bool webp =
+        isWebP(
             mem.data.data(),
-            (int)mem.data.size(),
-            &w,
-            &h,
-            &c,
-            3
+            mem.data.size()
         );
+
+    unsigned char* src =
+        nullptr;
+
+    if (webp) {
+
+        src = WebPDecodeRGB(
+            mem.data.data(),
+            mem.data.size(),
+            &w,
+            &h
+        );
+
+        c = 3;
+
+    } else {
+
+        src =
+            stbi_load_from_memory(
+                mem.data.data(),
+                (int)mem.data.size(),
+                &w,
+                &h,
+                &c,
+                3
+            );
+    }
 
     if (!src) {
 
-        std::cerr
-            << "stbi failed: "
-            << stbi_failure_reason()
-            << std::endl;
+        if (webp) {
 
-        throw std::runtime_error(
-            stbi_failure_reason()
-        );
+            throw std::runtime_error(
+                "webp decode failed"
+            );
+
+        } else {
+
+            std::cerr
+                << "stbi failed: "
+                << stbi_failure_reason()
+                << std::endl;
+
+            throw std::runtime_error(
+                stbi_failure_reason()
+            );
+        }
     }
 
     int target =
         std::max(
             8,
-            std::min(256, resize)
+            std::min(
+                256,
+                resize
+            )
         );
 
     std::vector<unsigned char> pixels(
@@ -332,7 +427,14 @@ ImageData loadImageToMatrix(
             3
         );
 
-    stbi_image_free(src);
+    if (webp) {
+
+        WebPFree(src);
+
+    } else {
+
+        stbi_image_free(src);
+    }
 
     if (!ok) {
 
@@ -348,24 +450,40 @@ ImageData loadImageToMatrix(
 
     out.pixels.resize(
         target,
-        std::vector<std::vector<uint8_t>>(
+        std::vector<
+            std::vector<uint8_t>
+        >(
             target,
             std::vector<uint8_t>(3)
         )
     );
 
-    for (int y = 0; y < target; ++y) {
+    for (
+        int y = 0;
+        y < target;
+        ++y
+    ) {
 
-        for (int x = 0; x < target; ++x) {
+        for (
+            int x = 0;
+            x < target;
+            ++x
+        ) {
 
             out.pixels[y][x][0] =
-                pixels[(y * target + x) * 3 + 0];
+                pixels[
+                    (y * target + x) * 3 + 0
+                ];
 
             out.pixels[y][x][1] =
-                pixels[(y * target + x) * 3 + 1];
+                pixels[
+                    (y * target + x) * 3 + 1
+                ];
 
             out.pixels[y][x][2] =
-                pixels[(y * target + x) * 3 + 2];
+                pixels[
+                    (y * target + x) * 3 + 2
+                ];
         }
     }
 
@@ -378,36 +496,53 @@ std::string toJson(
 
     std::ostringstream s;
 
-    s << "{\"width\":"
-      << img.width
-      << ",\"height\":"
-      << img.height
-      << ",\"pixels\":[";
+    s
+        << "{\"width\":"
+        << img.width
+        << ",\"height\":"
+        << img.height
+        << ",\"pixels\":[";
 
-    for (int y = 0; y < img.height; ++y) {
+    for (
+        int y = 0;
+        y < img.height;
+        ++y
+    ) {
 
         s << "[";
 
-        for (int x = 0; x < img.width; ++x) {
+        for (
+            int x = 0;
+            x < img.width;
+            ++x
+        ) {
 
-            auto& p = img.pixels[y][x];
+            auto& p =
+                img.pixels[y][x];
 
-            s << "["
-              << (int)p[0]
-              << ","
-              << (int)p[1]
-              << ","
-              << (int)p[2]
-              << "]";
+            s
+                << "["
+                << (int)p[0]
+                << ","
+                << (int)p[1]
+                << ","
+                << (int)p[2]
+                << "]";
 
-            if (x < img.width - 1) {
+            if (
+                x < img.width - 1
+            ) {
+
                 s << ",";
             }
         }
 
         s << "]";
 
-        if (y < img.height - 1) {
+        if (
+            y < img.height - 1
+        ) {
+
             s << ",";
         }
     }
@@ -421,14 +556,21 @@ int main() {
 
     int port = 8787;
 
-    char* envPort = getenv("PORT");
+    char* envPort =
+        getenv("PORT");
 
     if (envPort) {
-        port = std::stoi(envPort);
+
+        port =
+            std::stoi(envPort);
     }
 
     int sockfd =
-        socket(AF_INET, SOCK_STREAM, 0);
+        socket(
+            AF_INET,
+            SOCK_STREAM,
+            0
+        );
 
     int opt = 1;
 
@@ -442,9 +584,14 @@ int main() {
 
     sockaddr_in addr{};
 
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
+    addr.sin_family =
+        AF_INET;
+
+    addr.sin_addr.s_addr =
+        INADDR_ANY;
+
+    addr.sin_port =
+        htons(port);
 
     bind(
         sockfd,
@@ -462,7 +609,11 @@ int main() {
     while (true) {
 
         int client =
-            accept(sockfd, nullptr, nullptr);
+            accept(
+                sockfd,
+                nullptr,
+                nullptr
+            );
 
         char buf[8192];
 
@@ -470,7 +621,7 @@ int main() {
             read(
                 client,
                 buf,
-                sizeof(buf)-1
+                sizeof(buf) - 1
             );
 
         if (n <= 0) {
@@ -489,7 +640,9 @@ int main() {
             Query q =
                 parseQuery(req);
 
-            if (q.imageUrl.empty()) {
+            if (
+                q.imageUrl.empty()
+            ) {
 
                 std::string res =
                     httpJson(
@@ -518,7 +671,10 @@ int main() {
                 toJson(img);
 
             std::string res =
-                httpJson(200, body);
+                httpJson(
+                    200,
+                    body
+                );
 
             write(
                 client,
@@ -536,12 +692,17 @@ int main() {
                 << std::endl;
 
             std::string body =
-                std::string("{\"error\":\"")
+                std::string(
+                    "{\"error\":\""
+                )
                 + e.what()
                 + "\"}";
 
             std::string res =
-                httpJson(500, body);
+                httpJson(
+                    500,
+                    body
+                );
 
             write(
                 client,
